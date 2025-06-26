@@ -1,0 +1,283 @@
+#include <Adafruit_Fingerprint.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <WebServer.h>
+#include <WiFi.h>
+
+const char* ssid = "Cudy-A752";
+const char* password = "56170627";
+unsigned long startTime = 0;
+unsigned long startTime2 = 0;
+bool deleteTriggered = false;
+// LCD (20x4) I2C Address
+LiquidCrystal_I2C lcd(0x27, 20, 4); // Change to 0x3F if needed
+
+// Fingerprint sensor using Serial2 (GPIO16 = RX, GPIO17 = TX)
+Adafruit_Fingerprint finger(&Serial2);
+
+// LEDs and Buzzer
+#define GREEN_LED 4
+#define RED_LED   5
+#define BUZZER    18
+
+// Buttons
+#define ENROLL_BUTTON 19
+#define DELETE_BUTTON 23
+
+uint8_t enrollID = 1;  // Start from ID 1
+uint8_t lastEnrolledID = 0;
+uint8_t lastScannedID = 0;
+String enrollmentStatus = "Idle";
+
+
+WebServer server(80);
+
+void handleEnroll(uint8_t iID) {
+  lastEnrolledID = iID;  // Store globally
+  Serial.println("Enrollment successful. ID: " + String(iID));
+  enrollmentStatus = "Enrolled ID: " + String(iID);
+}
+
+
+
+uint8_t getMessage(uint8_t iID) {
+  unsigned long now = millis();
+  uint8_t msg = 0;
+
+  if (startTime == 0) startTime = now;
+
+  if (now - startTime < 10000) {
+    return iID;
+  } else {
+    return msg;
+  }
+}
+
+void handleExisting(uint8_t iID) 
+{
+ uint8_t message = getMessage(iID);
+  String html = "Last scanned ID: " + String(message);
+  server.send(200, "text/html", html);
+}
+
+
+
+String getMessage2() 
+  {
+    unsigned long now2 = millis();
+
+    if (!deleteTriggered) {
+      return "KEEP";
+    }
+
+    if (now2 - startTime2 < 10000) {
+      return "DELETE";
+    } else 
+      {
+        deleteTriggered = false;  // Reset after 5 seconds
+        return "KEEP";
+      }  
+  }
+
+
+void handleDelete() {
+  String message = getMessage2();
+  server.send(200, "text/plain", message);
+}
+
+
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  lcd.init(); lcd.backlight();
+  lcd.setCursor(0, 0); 
+  lcd.print("Connecting WiFi...");
+
+    WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500); Serial.print(".");
+  }
+
+  lcd.clear();
+  Serial.println("Starting...");
+
+  // LCD Init
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0, 0);
+  lcd.print("Initializing...");
+
+  // Fingerprint Serial2 init
+  Serial2.begin(57600, SERIAL_8N1, 16, 17);  // RX = GPIO16, TX = GPIO17
+  finger.begin(57600);
+  delay(200);
+
+  // GPIO Setup
+  pinMode(GREEN_LED, OUTPUT);
+  pinMode(RED_LED, OUTPUT);
+  pinMode(BUZZER, OUTPUT);
+  pinMode(ENROLL_BUTTON, INPUT_PULLUP);
+  pinMode(DELETE_BUTTON, INPUT_PULLUP);
+
+  if (finger.verifyPassword()) {
+    lcd.setCursor(0, 1);
+    lcd.print("Sensor ready       ");
+  } else {
+    lcd.setCursor(0, 1);
+    lcd.print("Sensor error!      ");
+    while (1) delay(1000);
+  }
+
+  delay(2000);
+  lcd.clear();
+
+  server.on("/last_enrolled", HTTP_GET, []() {
+  server.send(200, "text/plain", "Last enrolled ID: " + String(lastEnrolledID));
+  });
+
+  //server.on("/last_scanned",handleExisting());
+
+
+  server.on("/last_scanned", []() {
+  handleExisting(lastScannedID);
+   });
+
+   server.on("/delete_op", []() {
+  handleDelete();
+   });
+
+  server.begin();
+}
+
+void loop() {
+  
+  server.handleClient();
+
+  // Handle enroll
+  if (digitalRead(ENROLL_BUTTON) == LOW) {
+    enrollFingerprint(enrollID++);
+    delay(1000);
+    return;
+  }
+
+  // Handle delete
+  if (digitalRead(DELETE_BUTTON) == LOW) {
+    deleteFingerprints();
+    startTime2 = millis();       // Start 5-second window
+    deleteTriggered = true;      // Set flag
+    delay(1000);
+    return;
+  }
+
+  // Scan for finger
+  lcd.setCursor(0, 0);
+  lcd.print("Place finger...    ");
+
+  int result = finger.getImage();
+  if (result != FINGERPRINT_OK) return;
+
+  lcd.setCursor(0, 1);
+  lcd.print("Image taken        ");
+  delay(500);
+
+  result = finger.image2Tz();
+  if (result != FINGERPRINT_OK) return;
+
+  result = finger.fingerSearch();
+  if (result == FINGERPRINT_OK) {
+    lcd.setCursor(0, 2);
+    lcd.print("ID: ");
+    lcd.print(finger.fingerID);
+    lcd.print(" Score: ");
+    lcd.print(finger.confidence);
+    successSignal();
+
+    lastScannedID = finger.fingerID;
+    startTime = millis(); 
+  
+  } else {
+    lcd.setCursor(0, 2);
+    lcd.print("No match           ");
+    failSignal();
+  }
+
+  delay(2000);
+  lcd.clear();
+}
+
+void successSignal() {
+  digitalWrite(GREEN_LED, HIGH);
+  tone(BUZZER, 1000, 1000);
+  delay(500);
+  digitalWrite(GREEN_LED, LOW);
+}
+
+void failSignal() {
+  digitalWrite(RED_LED, HIGH);
+  tone(BUZZER, 3000, 200);
+  delay(500);
+  tone(BUZZER, 3000, 200);
+  delay(500);
+  tone(BUZZER, 3000, 200);
+  digitalWrite(RED_LED, LOW);
+}
+
+void enrollFingerprint(uint8_t id) {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Enroll ID ");
+  lcd.print(id);
+
+  lcd.setCursor(0, 1);
+  lcd.print("Place finger");
+
+  while (finger.getImage() != FINGERPRINT_OK);
+  if (finger.image2Tz(1) != FINGERPRINT_OK) return;
+
+  lcd.setCursor(0, 2);
+  lcd.print("Remove finger");
+  while (finger.getImage() != FINGERPRINT_NOFINGER);
+  delay(1000);
+
+  lcd.setCursor(0, 1);
+  lcd.print("Place again   ");
+  lcd.setCursor(0, 2);
+  lcd.print("                 ");
+
+  while (finger.getImage() != FINGERPRINT_OK);
+  if (finger.image2Tz(2) != FINGERPRINT_OK) return;
+
+  if (finger.createModel() == FINGERPRINT_OK && finger.storeModel(id) == FINGERPRINT_OK) {
+    lcd.setCursor(0, 2);
+    lcd.print("Enroll success     ");
+    successSignal();
+
+    handleEnroll(id);
+
+  } else {
+    lcd.setCursor(0, 2);
+    lcd.print("Enroll failed      ");
+    failSignal();
+  }
+
+  delay(2000);
+  lcd.clear();
+}
+
+void deleteFingerprints() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Deleting all...");
+
+  for (int i = 1; i < 128; i++) {
+    finger.deleteModel(i);
+  }
+
+  lcd.setCursor(0, 1);
+  lcd.print("All deleted        ");
+  failSignal();  // Optional tone
+  delay(2000);
+  lcd.clear();
+}
